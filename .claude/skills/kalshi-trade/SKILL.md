@@ -26,6 +26,17 @@ memory — read it if you lack context.
    parlays) and buckets candidates into genuine longshot-NO fades and contested
    directional markets, enriched with LIVE orderbook prices. Both are raw material,
    not a buy list.
+   **Edge engines:** run `cli.py engines run` (dry: it records to the paper ledger,
+   sends nothing) every tick, and `cli.py engines paper --settle` once a day. Engines
+   price markets from models (`weather`: NOAA NBM at the settlement station;
+   `arbitrage`: probability-axiom violations after fees) and only trust a model as far
+   as its out-of-sample record earned. **Never pass `--live` for an engine whose earned
+   weight is 0** (the weather engine's is: 2,180-event backtest, market Brier 0.104 vs
+   0.119, simulated -$888; see `docs/ENGINES.md`). A `[RISK-FREE]` arbitrage basket
+   is the exception: verify the rules of every leg yourself (Kalshi has shipped
+   mislabeled strike metadata), then `engines run --engines arbitrage --live`.
+   Promote an engine to live capital only when its paper log loss beats the market's
+   over many settled orders AND its paper P&L is positive.
 3. **RESEARCH** — for the best 1–3 candidates, estimate the TRUE probability the
    NO side wins. Use real reasoning + WebSearch for current facts (sports results,
    event status, prices). **This step is the whole point** — it's where you beat

@@ -118,6 +118,8 @@ async def place_guarded_order(
     policy_path: Optional[str] = None,
     override_policy: bool = False,
     expiration_ts: Optional[int] = None,
+    strategy: str = "claude",
+    method: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Place ONE order through the full guard stack, journaling the prediction.
 
@@ -157,6 +159,7 @@ async def place_guarded_order(
         verdict = apply_policy(policy, {
             "ticker": ticker, "side": side,
             "category": category or series_category(ticker), "est_prob": est_prob,
+            "method": method,
         })
         if verdict["verdict"] == "BLOCK":
             if not override_policy:
@@ -224,8 +227,8 @@ async def place_guarded_order(
         append_decision(make_decision_record(
             ticker=ticker, side=side, count=n, price=price_cents / 100.0,
             est_prob=est_prob, edge=edge, rationale=rationale, category=category,
-            strategy="claude", order_id=result.get("order_id"),
-            policy_note=policy_note,
+            strategy=strategy, order_id=result.get("order_id"),
+            policy_note=policy_note, method=method,
         ), journal_path or DEFAULT_JOURNAL_PATH)
     if policy_note:
         result["policy_note"] = policy_note

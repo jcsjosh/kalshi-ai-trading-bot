@@ -25,9 +25,10 @@ import src.mcp_server as server
 
 EXPECTED_TOOLS = {
     "brief", "settle", "learnings", "edge", "policy", "status",
-    "scores", "history", "hunt", "trade", "close",
+    "scores", "history", "hunt", "trade", "close", "engines_scan", "engines_paper",
 }
-READ_ONLY = {"brief", "settle", "learnings", "edge", "policy", "status", "scores", "history", "hunt"}
+READ_ONLY = {"brief", "settle", "learnings", "edge", "policy", "status", "scores", "history", "hunt",
+             "engines_scan", "engines_paper"}
 MUTATING = {"trade", "close"}
 
 

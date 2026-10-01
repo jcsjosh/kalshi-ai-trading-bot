@@ -15,7 +15,7 @@ An agent-native toolkit for [Kalshi](https://kalshi.com) whose flagship isn't "a
 
 Under the hood: a signed Kalshi API client, market-data ingestion, position tracking, SQLite telemetry, a Streamlit dashboard, a pluggable LLM client (any model on OpenRouter), atomic agent CLI tools, a Claude skill, and a first-mover MCP server. Example strategies ship as starting points — fork them, replace them, or write your own.
 
-[**Live Track Record**](docs/TRACK_RECORD.md) · [**Jev on Kalshi: measured**](docs/JEV.md) · [Quick Start](#quick-start) · [Prove Your Edge](#prove-your-edge-the-headline) · [Agent-Native Surface](#agent-native-surface) · [What's Included](#whats-included) · [Example Strategies](#example-strategies) · [Configuration](#configuration) · [Contributing](CONTRIBUTING.md)
+[**Live Track Record**](docs/TRACK_RECORD.md) · [**Edge Engines: measured**](docs/ENGINES.md) · [**Jev on Kalshi: measured**](docs/JEV.md) · [Quick Start](#quick-start) · [Prove Your Edge](#prove-your-edge-the-headline) · [Agent-Native Surface](#agent-native-surface) · [What's Included](#whats-included) · [Example Strategies](#example-strategies) · [Configuration](#configuration) · [Contributing](CONTRIBUTING.md)
 
 </div>
 
@@ -69,7 +69,25 @@ The same honesty rule as `edge` applies everywhere: **a group with fewer than 5 
 
 This is the loop, closed: **decide → trade → settle → measure → re-derive the policy → the policy gates the next decision.** Your outcomes feed forward. Run it against a shipped example with `cli policy --demo` (no keys needed), then point it at your own record.
 
-> Not a backtest. A backtest needs a captured price/outcome corpus this repo doesn't ship yet (`cli backtest` explains why). The self-improvement loop needs no corpus — it learns from the settlements you already have.
+> Not a backtest. A general backtest needs a captured price/outcome corpus this repo doesn't ship yet (`cli backtest` explains why); the weather engine below has its own walk-forward backtest. The self-improvement loop needs no corpus — it learns from the settlements you already have.
+
+---
+
+## Edge Engines (models that have to earn their trust)
+
+Engines price markets from their own models and trade only through the same guard stack, journal and Edge Policy as everything else (`method=engine:<name>`, so a losing engine gets blocked on its own record). Each engine's view is shrunk toward the market by the trust it has **earned out-of-sample**: zero until a backtest or paper record proves otherwise. Full write-up: **[docs/ENGINES.md](docs/ENGINES.md)**.
+
+| Engine | Model | Measured |
+|---|---|---|
+| `weather` | NOAA National Blend of Models at the exact NWS settlement station, calibrated per station, truncated by today's observations | **No edge.** 2,180 settled events: market Brier 0.104 vs engine 0.119. Walk-forward trading lost $888 (t = -2.2); the Edge Policy would have shut it off after 8 trades (-$68). Earned weight: 0, so it abstains |
+| `arbitrage` | Probability-axiom violations (all-NO, proven-exhaustive all-YES, same-subject ladders) after per-series fees, walked off live depth | Full scan of ~13,800 events in ~16s; nothing survives fees today. Rejects two real data traps (cross-player ladders, mislabeled "exactly N" strikes) that would otherwise show $300+ "risk-free" mirages |
+
+```bash
+python cli.py engines scan             # price everything, list opportunities (read-only, no key needed)
+python cli.py engines run              # same, then record to the paper ledger (nothing sent)
+python cli.py engines paper --settle   # score each engine's paper record vs the market
+python cli.py engines backtest --save-weight   # weather: walk-forward backtest -> earned trust weight
+```
 
 ---
 
@@ -124,6 +142,7 @@ The toolkit is built to be driven by an agent (Claude, or anything else) through
 | `report` | writes | Render the public **[Live Track Record](docs/TRACK_RECORD.md)** from the persisted settlements / journal / policy — losses included. Offline-capable |
 | `policy` | read-only | The data-driven **Edge Policy** your settled record earns: block losing categories, warn on losing sides, haircut overconfident bands. `--demo` runs on a shipped fixture |
 | `improve` | writes | **The self-improvement loop** — settle → reconcile → re-derive the policy → diff what changed → persist the gate. `--dry` for read-only |
+| `engines scan` · `run` · `paper` · `backtest` · `calibrate` | read-only / paper (`run --live` mutates) | **[Edge engines](docs/ENGINES.md)**: price markets from models (weather, arbitrage), shrink toward the market by *earned* trust, record a paper ledger, and trade live only through `place_guarded_order` |
 | `scores` · `history` · `status` | read-only | Category scores, closed-trade history, live balance/positions |
 
 Plus `run` / `daily` (strategy loops), `health` (connectivity check), and `scripts/capture_corpus.py` (daily price-snapshot capture that feeds a future backtest). `trade` and `close` both default to a dry-run preview and route through the risk governor + per-position cap — the same guard stack everything else uses.
@@ -151,6 +170,7 @@ This repo gives you the building blocks. The example strategies use them — you
 | **Position tracking** | Stop-loss, take-profit, time-based, and resolution-based exits with real Kalshi sell orders | `src/jobs/track.py` |
 | **LLM client** | Single OpenRouter API key, swap models with one config line, fallback chain on errors, daily-cost tracker | `src/clients/openrouter_client.py` |
 | **SQLite telemetry** | Every trade, AI decision, and cost metric logged locally | `src/utils/database.py` |
+| **Edge engines** | Model-driven pricing (weather, arbitrage) + series-aware fees + fee-aware Kelly evaluator + paper ledger + walk-forward backtest; trust weight earned out-of-sample | `src/engines/` |
 | **MCP server** | First-mover MCP layer over the governor-gated tools | `src/mcp_server.py` |
 | **Streamlit dashboard** | Real-time portfolio, positions, P&L, decision logs | `beast_mode_dashboard.py` |
 | **Risk helpers** | Quarter-Kelly sizing, stop-loss math, drawdown circuit breaker, sector caps | `src/risk/`, `src/strategies/` |

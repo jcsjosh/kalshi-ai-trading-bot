@@ -283,6 +283,46 @@ async def hunt(top: int = 25, books: bool = True) -> Dict[str, Any]:
     return await _with_client(_run)
 
 
+@mcp.tool(annotations=_READ_ONLY)
+async def engines_scan(engines: str = "weather,arbitrage", bankroll: float = 1000.0,
+                       min_edge: float = 0.03, max_orders: int = 20) -> Dict[str, Any]:
+    """Run the model-driven edge engines over the live book (public data, no key needed).
+    ``weather`` prices every open temperature market from NOAA's calibrated station
+    forecasts; ``arbitrage`` finds probability-axiom violations after fees, walked off
+    live depth. Each engine only trusts its model as far as its out-of-sample record
+    earned (``priced.weather.weight``; 0 means it may only trade outcomes today's
+    observations already decided). Read-only. Mirrors ``cli.py engines scan --json``."""
+    import asyncio
+
+    from src.engines.evaluate import EvalConfig
+    from src.engines.http import Fetcher
+    from src.engines.runner import scan
+
+    def _run():
+        with Fetcher() as f:
+            return scan(f, [e.strip() for e in engines.split(",") if e.strip()],
+                        EvalConfig(bankroll=bankroll, min_edge=min_edge), max_orders)
+
+    report = await asyncio.to_thread(_run)
+    return {
+        "selected": [o.to_dict() for o in report.selected],
+        "baskets": [b.to_dict() for b in report.baskets],
+        "priced": {k: {kk: vv for kk, vv in v.items() if kk != "events_detail"}
+                   for k, v in report.priced.items()},
+        "notes": report.notes,
+    }
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def engines_paper() -> Dict[str, Any]:
+    """Per-engine forward paper-trading record (orders recorded by dry ``cli.py engines
+    run``): P&L, ROI, and log loss of the engine vs the market at decision time. Run
+    ``cli.py engines paper --settle`` to attach new settlements. Read-only."""
+    from src.engines import ledger
+
+    return ledger.summarize(ledger.load())
+
+
 # ---------------------------------------------------------------------------
 # MUTATING tools — dry-run by default; route through the guarded functions.
 # ---------------------------------------------------------------------------

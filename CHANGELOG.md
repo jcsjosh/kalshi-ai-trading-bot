@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Edge engines** (`src/engines/`, `cli.py engines ...`, MCP `engines_scan` / `engines_paper`) —
+  model-driven pricing that plugs into the guard stack instead of around it. See
+  **[docs/ENGINES.md](docs/ENGINES.md)**.
+  - Shared core: per-series Kalshi fees from `GET /series` (`fee_type`, `fee_multiplier`,
+    maker fees only where enabled); normalized quotes and live order-book depth; a fee-aware
+    evaluator that shrinks each engine toward the market by its *earned* trust weight, values
+    maker fills at the posted price, and sizes with capped fractional Kelly; a portfolio
+    selector with per-market, per-event and per-scan budgets.
+  - `weather`: NOAA NBM station forecasts at the exact NWS settlement station, calibrated per
+    station against IEM's archive of CLI reports, truncated by quality-controlled observations.
+    Walk-forward backtest over 2,180 settled events: **no edge** (market Brier 0.104 vs 0.119;
+    simulated trading -$888, t = -2.2), so its earned weight is 0 and it abstains.
+  - `arbitrage`: all-NO, proven-exhaustive all-YES and same-subject ladders across the whole
+    open universe (~16s), walked off live depth to the profit-maximizing basket count;
+    live baskets preflight every leg through the guards before sending any.
+  - Paper ledger (`engines run` is dry by default; `engines paper --settle` scores engine vs
+    market log loss and P&L, inferring maker fills from later prints).
+  - `place_guarded_order` takes optional `strategy` / `method` tags (backward-compatible), so
+    engine trades are journaled as `method=engine:<name>` and the Edge Policy can block a
+    losing engine by itself.
 - **TypeSafe Jev support** (`~typesafe/jev-latest`, OpenRouter Decisions API) — measured, not
   hyped: see **[docs/JEV.md](docs/JEV.md)**. `cli verify --jev` floors the skeptic's
   true-YES at Jev's independent P(YES) (stricter-only); `src/agent/jev.py` +

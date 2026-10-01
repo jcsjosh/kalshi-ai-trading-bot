@@ -28,6 +28,11 @@ Non-negotiables:
 - Near a drawdown limit, deploy conservatively; halted ⇒ hold the sound book, no new buys.
 - If a position settles today, check its live status before assuming it's fine.
 
+Also run `PYTHONPATH=. .venv/bin/python cli.py engines run` once per tick (dry: it
+paper-records what the edge engines would trade, nothing is sent) and
+`cli.py engines paper --settle` once a day, so every engine builds a forward record
+before it can earn live capital (`docs/ENGINES.md`).
+
 Also run `PYTHONPATH=. .venv/bin/python scripts/capture_corpus.py` once per tick —
 it snapshots the full market universe to `data/corpus/` (idempotent per UTC day).
 This corpus is what will make a real backtest possible; gaps are honest, never fatal.

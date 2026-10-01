@@ -8,6 +8,7 @@ Provides a single entry point for all bot operations:
     python cli.py status       Show portfolio balance, positions, and P&L
     python cli.py backtest     Run backtests (placeholder)
     python cli.py health       Verify API connections, database, and configuration
+    python cli.py engines      Model-driven edge engines (scan, backtest, paper, run)
 """
 
 import argparse
@@ -1903,6 +1904,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip the interactive 'CLOSE ALL' confirmation (dangerous)",
     )
     p_close.set_defaults(func=cmd_close_all)
+
+    # --- engines (model-driven edge engines) ---
+    from src.engines.cli import add_parser as add_engines_parser
+
+    add_engines_parser(subparsers)
 
     return parser
 
