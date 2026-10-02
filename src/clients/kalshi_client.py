@@ -87,6 +87,21 @@ def build_order_v2_payload(
     return payload
 
 
+def _pem_from_env() -> Optional[bytes]:
+    """The private key from ``KALSHI_PRIVATE_KEY`` (for hosts that store secrets as
+    environment variables, not files). Accepts the PEM text, the PEM with literal
+    ``\\n`` escapes, or the whole PEM base64-encoded on one line."""
+    raw = os.environ.get("KALSHI_PRIVATE_KEY", "").strip()
+    if not raw:
+        return None
+    if "BEGIN" not in raw:
+        try:
+            raw = base64.b64decode(raw).decode()
+        except (ValueError, UnicodeDecodeError):
+            raise KalshiAPIError("KALSHI_PRIVATE_KEY is neither PEM nor base64-encoded PEM")
+    return raw.replace("\\n", "\n").encode()
+
+
 class KalshiClient(TradingLoggerMixin):
     """
     Kalshi API client for automated trading.
@@ -130,15 +145,13 @@ class KalshiClient(TradingLoggerMixin):
     def _load_private_key(self) -> None:
         """Load private key from file."""
         try:
-            private_key_path = Path(self.private_key_path)
-            if not private_key_path.exists():
-                raise KalshiAPIError(f"Private key file not found: {self.private_key_path}")
-            
-            with open(private_key_path, 'rb') as f:
-                self.private_key = serialization.load_pem_private_key(
-                    f.read(),
-                    password=None
-                )
+            pem = _pem_from_env()
+            if pem is None:
+                private_key_path = Path(self.private_key_path)
+                if not private_key_path.exists():
+                    raise KalshiAPIError(f"Private key file not found: {self.private_key_path}")
+                pem = private_key_path.read_bytes()
+            self.private_key = serialization.load_pem_private_key(pem, password=None)
             self.logger.info("Private key loaded successfully")
         except Exception as e:
             self.logger.error("Failed to load private key", error=str(e))

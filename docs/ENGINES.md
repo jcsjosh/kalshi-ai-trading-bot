@@ -56,6 +56,27 @@ the arbitrage cross-check. The MCP server exposes `engines_scan` and
    Risk-free baskets go first; no single order is sent on a market a basket
    already touches.
 
+## Running it every day, unattended
+
+```bash
+BOT_STATE_REPO=you/kalshi-bot-state python cli.py engines daily --live --live-cap 500
+```
+
+One tick: restore the bot's record from a **private** state repo, settle paper
+trades and let each engine's shadow record earn (or lose) trust, refit the
+weather calibration weekly, scan, paper-record everything, send live orders
+**only** for engines with earned trust and for risk-free arbitrage baskets
+(sized from `min(equity, --live-cap)`, through the governor and Edge Policy),
+write `data/engines/reports/daily_<date>.md`, and save the record back. Without
+Kalshi credentials it stays on paper. Credentials can come from environment
+variables (`KALSHI_API_KEY`, and `KALSHI_PRIVATE_KEY` holding the PEM text,
+`\n`-escaped PEM, or base64 PEM), which is how cloud environments store secrets.
+
+The state repo must be private: this trading repo may be public, and the record
+includes your trades. **Kill switch from your phone:** add a file
+`runtime/TRADING_HALTED` to the state repo (the GitHub app can do it); the next
+tick restores it and the governor refuses all buying.
+
 ## How an engine earns trust
 
 Every engine starts at `w = 0`, where its view cannot move a price. Trust is

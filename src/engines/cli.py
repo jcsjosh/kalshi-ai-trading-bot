@@ -177,6 +177,17 @@ def cmd_promote(args: argparse.Namespace) -> None:
         print(f"trust weight for {args.engine} set to {verdict['weight']}")
 
 
+def cmd_daily(args: argparse.Namespace) -> None:
+    import os
+
+    from src.engines.daily import render, run_daily
+
+    result = run_daily(live=args.live, live_cap=args.live_cap,
+                       state_repo=args.state_repo or os.environ.get("BOT_STATE_REPO"),
+                       log=lambda m: print(m, file=sys.stderr, flush=True))
+    print(render(result))
+
+
 def cmd_backtest(args: argparse.Namespace) -> None:
     from src.engines.http import Fetcher
     from src.engines.trust import save_weight
@@ -274,6 +285,15 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
     pr.add_argument("engine", choices=[e for e in ENGINE_NAMES if e != "arbitrage"])
     pr.add_argument("--save", action="store_true", help="write the earned weight (default: report only)")
     pr.set_defaults(func=cmd_promote)
+
+    d = sub.add_parser("daily", help="One unattended tick: restore record, learn, scan, trade what's earned, save")
+    d.add_argument("--live", action="store_true",
+                   help="Allow REAL orders, only for engines with earned trust and risk-free baskets")
+    d.add_argument("--live-cap", dest="live_cap", type=float, default=500.0,
+                   help="Max bankroll the bot sizes from, $ (default 500)")
+    d.add_argument("--state-repo", dest="state_repo", default=None,
+                   help="private owner/repo holding the bot's record (default: $BOT_STATE_REPO)")
+    d.set_defaults(func=cmd_daily)
 
     b = sub.add_parser("backtest", help="Walk-forward weather backtest vs settled Kalshi markets")
     b.add_argument("--start", help="first traded target date (default: 59 days ago)")

@@ -211,6 +211,7 @@ data/corpus/
 # Edge engines: HTTP cache, paper ledger, scan reports, calibration (regenerable, local)
 data/cache/
 data/engines/
+.bot-state/
 *.jsonl
 # ...but the shipped demo fixtures MUST travel with the repo (cli policy --demo).
 !tests/fixtures/demo_*.jsonl
