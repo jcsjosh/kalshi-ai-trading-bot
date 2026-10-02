@@ -14,7 +14,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+import re
+from typing import Any, Dict, Optional, Tuple
 
 from src.engines.weather.stations import Station
 
@@ -27,6 +28,8 @@ class ObservedSoFar:
     min_f: Optional[int]
     n_obs: int
     last_obs: Optional[datetime]
+    max_exact: bool = True  # binding reading had tenths of a degree C (vs whole-degree C)
+    min_exact: bool = True
 
 
 def _c_to_f(c: float) -> float:
@@ -65,23 +68,53 @@ def _deglitch(series):
     return kept
 
 
+_TGROUP = re.compile(r"\bT([01])(\d{3})([01])(\d{3})\b")
+
+
+def reading_celsius(props: Dict[str, Any]) -> Optional[Tuple[float, float]]:
+    """(temperature C, half-width of its precision C) for one observation.
+
+    Hourly METARs carry a T-group with tenths ("T02440233" = 24.4 C); prefer it.
+    Without one, a whole-degree value (the 5-minute ASOS feed: 24.0, 25.0) only
+    says the truth was within +-0.5 C, nearly a degree F either way.
+    """
+    m = _TGROUP.search(props.get("rawMessage") or "")
+    if m:
+        t = int(m.group(2)) / 10.0
+        return (-t if m.group(1) == "1" else t), 0.05
+    val = (props.get("temperature") or {}).get("value")
+    if val is None:
+        return None
+    v = float(val)
+    return v, (0.5 if abs(v - round(v)) < 1e-6 else 0.05)
+
+
 def summarize_observations(features, start: datetime, end: datetime) -> ObservedSoFar:
+    """Bounds on today's extremes that hold whatever each reading's precision:
+    the high is at least the *lowest* temperature a reading could have been,
+    the low at most the *highest*."""
     series = []
     for f in features or []:
         props = f.get("properties", {})
         ts = props.get("timestamp")
         reading = props.get("temperature") or {}
-        val = reading.get("value")
-        if ts is None or val is None or reading.get("qualityControl") in BAD_QC:
+        if ts is None or reading.get("qualityControl") in BAD_QC:
+            continue
+        got = reading_celsius(props)
+        if got is None:
             continue
         t = datetime.fromisoformat(ts.replace("Z", "+00:00"))
         if start <= t < end:
-            series.append((t, _c_to_f(float(val))))
-    series = _deglitch(sorted(series))
+            series.append((t, _c_to_f(got[0]), _c_to_f(got[0] - got[1]), _c_to_f(got[0] + got[1]), got[1] < 0.1))
+    kept = _deglitch([(r[0], r[1]) for r in sorted(series)])
+    keep_ts = {t for t, _ in kept}
+    series = [r for r in sorted(series) if r[0] in keep_ts]
     if not series:
         return ObservedSoFar(None, None, 0, None)
-    temps = [v for _, v in series]
-    return ObservedSoFar(round(max(temps)), round(min(temps)), len(series), series[-1][0])
+    hi_r = max(series, key=lambda r: r[2])  # reading that sets the floor on the high
+    lo_r = min(series, key=lambda r: r[3])  # reading that sets the ceiling on the low
+    return ObservedSoFar(round(hi_r[2]), round(lo_r[3]), len(series), series[-1][0],
+                         max_exact=hi_r[4], min_exact=lo_r[4])
 
 
 def observed_so_far(fetcher, station: Station, now: Optional[datetime] = None) -> ObservedSoFar:

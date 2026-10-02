@@ -76,6 +76,9 @@ dashboard = [
 mcp = [
     "mcp>=1.13,<2",
 ]
+engines = [
+    "sports-skills>=0.35",  # games engine: ESPN/DraftKings lines + Kalshi<->Polymarket game matching
+]
 
 [project.scripts]
 kalshi-bot = "cli:main"

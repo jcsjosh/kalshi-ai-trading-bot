@@ -25,6 +25,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     live baskets preflight every leg through the guards before sending any.
   - Paper ledger (`engines run` is dry by default; `engines paper --settle` scores engine vs
     market log loss and P&L, inferring maker fills from later prints).
+  - `games` engine: Kalshi game winners (NFL, CFB, MLB, NHL, NBA, WNBA) vs a consensus of the
+    de-vigged DraftKings line and Polymarket's CLOB book, matched via `sports-skills`
+    (optional extra: `pip install -e ".[engines]"`). Untested by design (no sportsbook archive);
+    shadow-only until its paper record earns trust.
+  - Shadow paper trading + `engines promote <engine>`: untrusted engines record what they would
+    trade at full trust (never sent), and earn trust only from that settled record (log loss
+    beats the market at z >= 2 AND positive P&L). `calibrate --weight` removed.
+  - oracle3 cross-check (`src/engines/crosscheck.py`): every risk-free basket is re-priced by
+    oracle3's `check_constraint` when installed; unconfirmed baskets are never traded.
+  - Review fixes (two-axis review, `skills` repo method): whole-basket cash preflight, per-leg
+    unhedged-excess reporting, de-duplicated live plan, uncertainty margin kept on resize,
+    ledger scores the engine's own probability, arbitrage capped by the per-event budget.
   - `place_guarded_order` takes optional `strategy` / `method` tags (backward-compatible), so
     engine trades are journaled as `method=engine:<name>` and the Edge Policy can block a
     losing engine by itself.

@@ -37,11 +37,12 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
-from scipy import optimize
 
+from src.agent.policy import DEFAULT_MIN_N
 from src.engines.evaluate import EvalConfig, Fair, evaluate, logit, select, sigmoid
 from src.engines.fees import FeeSchedule
-from src.engines.market import Event, KalshiPublic, Quote
+from src.engines.market import Event, KalshiPublic, Quote, devig
+from src.engines.trust import earned_weight, fit_weight, scores
 from src.engines.weather.calibration import Sample, WeatherCalibration
 from src.engines.weather.climate import fetch_cli_year
 from src.engines.weather.model import TempDistribution
@@ -195,74 +196,10 @@ def _candle_quote(candles: List[dict], at: datetime) -> Tuple[Optional[float], O
     return px("yes_bid"), px("yes_ask")
 
 
-def devig(quotes: List[Quote]) -> Dict[str, float]:
-    """Market-implied probabilities from mids, normalized across an exhaustive event."""
-    mids = {}
-    for q in quotes:
-        if q.yes_bid is None and q.yes_ask is None:
-            mids[q.ticker] = 0.005
-        else:
-            lo = q.yes_bid if q.yes_bid is not None else 0.0
-            hi = q.yes_ask if q.yes_ask is not None else min(lo + 0.02, 1.0)
-            mids[q.ticker] = max((lo + hi) / 2.0, 0.005)
-    total = sum(mids.values())
-    return {t: v / total for t, v in mids.items()} if total > 0 else {}
-
-
 # -- the blend weight ------------------------------------------------------------
 
 
-def fit_weight(rows: List[dict]) -> float:
-    """Log-loss-optimal trust in the model vs the market on resolved rows."""
-    if not rows:
-        return 0.0
-    pm = np.array([logit(r["p_model"]) for r in rows])
-    pk = np.array([logit(r["p_market"]) for r in rows])
-    y = np.array([r["outcome"] for r in rows], float)
-
-    def nll(w):
-        p = 1.0 / (1.0 + np.exp(-(w * pm + (1 - w) * pk)))
-        p = np.clip(p, 1e-6, 1 - 1e-6)
-        return -np.mean(y * np.log(p) + (1 - y) * np.log(1 - p))
-
-    res = optimize.minimize_scalar(nll, bounds=(0.0, 1.0), method="bounded")
-    return float(res.x)
-
-
-def earned_weight(rows: List[dict], z: float = 2.0) -> Tuple[float, float]:
-    """The trust weight the record has *earned*, and the z-score behind it.
-
-    Fit the log-loss-optimal blend weight, then ask whether blending actually
-    beat the market by more than noise: the per-row log-loss improvement must
-    be ``z`` standard errors above zero. Otherwise the answer is 0: a weight
-    fitted on noise is exactly how a backtest talks itself into losing trades.
-    """
-    if len(rows) < 50:
-        return 0.0, 0.0
-    w = fit_weight(rows)
-    if w <= 0:
-        return 0.0, 0.0
-    pm = np.array([logit(r["p_model"]) for r in rows])
-    pk = np.array([logit(r["p_market"]) for r in rows])
-    y = np.array([r["outcome"] for r in rows], float)
-
-    def ll(x):
-        p = np.clip(1.0 / (1.0 + np.exp(-x)), 1e-6, 1 - 1e-6)
-        return -(y * np.log(p) + (1 - y) * np.log(1 - p))
-
-    gain = ll(pk) - ll(w * pm + (1 - w) * pk)
-    # Buckets of one event share an outcome, so treat each event-decision as one draw.
-    groups: Dict[tuple, float] = defaultdict(float)
-    for r, g in zip(rows, gain):
-        groups[(r["ticker"].rsplit("-", 1)[0], r.get("schedule"))] += float(g)
-    vals = np.array(list(groups.values()))
-    if len(vals) < 20:
-        return 0.0, 0.0
-    zscore = float(vals.mean() / (vals.std(ddof=1) / math.sqrt(len(vals)))) if vals.std(ddof=1) > 0 else 0.0
-    return (w if zscore >= z else 0.0), round(zscore, 2)
-
-
-def apply_edge_policy(trades: List[dict], min_n: int = 5) -> Tuple[List[dict], Dict[str, str]]:
+def apply_edge_policy(trades: List[dict], min_n: int = DEFAULT_MIN_N) -> Tuple[List[dict], Dict[str, str]]:
     """Replay the live Edge Policy over a trade sequence.
 
     Mirrors ``src.agent.policy``: once a group (the engine as a whole, or one
@@ -292,17 +229,6 @@ def apply_edge_policy(trades: List[dict], min_n: int = 5) -> Tuple[List[dict], D
 
 
 # -- the run ------------------------------------------------------------------------
-
-
-def _scores(rows: List[dict], key: str) -> Dict[str, float]:
-    if not rows:
-        return {"brier": float("nan"), "log_loss": float("nan")}
-    p = np.clip(np.array([r[key] for r in rows]), 1e-6, 1 - 1e-6)
-    y = np.array([r["outcome"] for r in rows], float)
-    return {
-        "brier": round(float(np.mean((p - y) ** 2)), 5),
-        "log_loss": round(float(-np.mean(y * np.log(p) + (1 - y) * np.log(1 - p))), 5),
-    }
 
 
 def _trade_stats(trades: List[dict]) -> Dict[str, float]:
@@ -481,7 +407,7 @@ def run_backtest(fetcher, cfg: BacktestConfig, log=print, kp: Optional[KalshiPub
         seg_groups[f"{r['schedule']}/{r['kind']}"].append(r)
         seg_groups[f"series/{r['ticker'].split('-')[0]}"].append(r)
     segments = {
-        k: {"n": len(v), "model": _scores(v, "p_model"), "market": _scores(v, "p_market"),
+        k: {"n": len(v), "model": scores(v, "p_model"), "market": scores(v, "p_market"),
             "weight": round(fit_weight(v), 3) if len(v) >= 50 else None,
             "earned": earned_weight(v)[0] > 0}
         for k, v in sorted(seg_groups.items())
@@ -492,9 +418,9 @@ def run_backtest(fetcher, cfg: BacktestConfig, log=print, kp: Optional[KalshiPub
     allowed, blocks = apply_edge_policy(trades)
     return BacktestResult(
         config={k: (v.isoformat() if isinstance(v, date) else v) for k, v in asdict(cfg).items()},
-        model=_scores(scored, "p_model"),
-        market=_scores(scored, "p_market"),
-        blend=_scores(scored, "p_blend"),
+        model=scores(scored, "p_model"),
+        market=scores(scored, "p_market"),
+        blend=scores(scored, "p_blend"),
         final_weight=round(final_w, 3),
         weight_z=final_z,
         trades=_trade_stats(trades),

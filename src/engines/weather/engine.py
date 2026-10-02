@@ -14,14 +14,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from zoneinfo import ZoneInfo
 
 from src.engines.evaluate import Fair
-from src.engines.market import Event, KalshiPublic, Quote
-from src.engines.weather.backtest import devig, discover_temperature_series
+from src.engines.market import Event, KalshiPublic, Quote, devig
+from src.engines.weather.backtest import discover_temperature_series
 from src.engines.weather.calibration import DEFAULT_CALIBRATION_PATH, WeatherCalibration
-from src.engines.weather.model import TempDistribution
-from src.engines.weather.nbm import NbmIndex, fetch_nbs
+from src.engines.weather.model import ObservedExtreme, TempDistribution
+from src.engines.weather.nbm import NbmIndex, NbmTemp, fetch_nbs_text, parse_nbs_csv, parse_nbs_temps, remaining_extreme
 from src.engines.weather.obs import ObservedSoFar, observed_so_far
 from src.engines.weather.stations import (
     STATIONS,
@@ -31,9 +30,9 @@ from src.engines.weather.stations import (
 )
 
 ACTIVE_SERIES_PATH = Path("data/engines/weather_active_series.json")
-PEAK_HOUR_LST = 16  # after this, today's high is mostly set and the forecast part is stale
 BASE_STDERR = 0.01
-LATE_DAY_STDERR = 0.08
+SAME_DAY_STDERR = 0.03  # hourly forecasts miss the between-hour extremes the CLI records
+REMAINING_SIGMA = 2.0  # spread of the rest-of-day extreme around the hourly forecast
 
 
 @dataclass
@@ -81,6 +80,7 @@ class WeatherEngine:
         self.now = now or datetime.now(timezone.utc)
         self.log = log
         self._nbm: Dict[str, NbmIndex] = {}
+        self._temps: Dict[str, List[NbmTemp]] = {}
         self._obs: Dict[str, Optional[ObservedSoFar]] = {}
 
     @property
@@ -89,9 +89,10 @@ class WeatherEngine:
 
     def _forecasts(self, code: str) -> NbmIndex:
         if code not in self._nbm:
-            rows = fetch_nbs(self.fetcher, STATIONS[code].icao, self.now - timedelta(hours=30), self.now,
-                             cache_ttl=900)
-            self._nbm[code] = NbmIndex(rows)
+            text = fetch_nbs_text(self.fetcher, STATIONS[code].icao, self.now - timedelta(hours=30), self.now,
+                                  cache_ttl=900)
+            self._nbm[code] = NbmIndex(parse_nbs_csv(text))
+            self._temps[code] = parse_nbs_temps(text)
         return self._nbm[code]
 
     def _observed(self, code: str) -> Optional[ObservedSoFar]:
@@ -114,29 +115,28 @@ class WeatherEngine:
         if f is None:
             return None
 
-        lower = upper = None
         stderr = BASE_STDERR
         observed = None
         today = station.climate_date(self.now)
         if target < today:
             return None  # the day is over; settlement is a lookup, not a forecast
+        params = self.cal.params(code, kind)
+        dist = TempDistribution.from_forecast(f.txn, f.xnd, params)
         if target == today:
             observed = self._observed(code)
-            if observed is None:
+            bound = None if observed is None else (observed.max_f if kind == "high" else observed.min_f)
+            if bound is None:
                 return None  # same-day without observations would ignore what everyone else can see
-            if kind == "high" and observed.max_f is not None:
-                lower = observed.max_f
-            if kind == "low" and observed.min_f is not None:
-                upper = observed.min_f
-            local = self.now.astimezone(ZoneInfo(station.tz))
-            lst_hour = (local - (local.dst() or timedelta(0))).hour
-            if kind == "high" and lst_hour >= PEAK_HOUR_LST:
-                stderr = LATE_DAY_STDERR
-            if kind == "low" and lst_hour >= 9:
-                stderr = LATE_DAY_STDERR  # overnight low is in; a cold evening is what's left
+            exact = observed.max_exact if kind == "high" else observed.min_exact
+            # Today's extreme = the more extreme of what's been observed and what the
+            # rest of the day brings, forecast from the latest run's hourly temperatures.
+            _, day_end = station.climate_day_utc(target)
+            rest = remaining_extreme(self._temps.get(code, []), kind, self.now, day_end)
+            remaining = None if rest is None else TempDistribution(
+                mu=rest + params.bias, sigma=max(params.floor, REMAINING_SIGMA), df=params.df)
+            dist = ObservedExtreme(kind, int(bound), exact, remaining)
+            stderr = SAME_DAY_STDERR
 
-        params = self.cal.params(code, kind)
-        dist = TempDistribution.from_forecast(f.txn, f.xnd, params, lower=lower, upper=upper)
         implied = devig(ms)
         fairs = []
         for q in ms:
@@ -152,13 +152,20 @@ class WeatherEngine:
                 stderr=0.0 if certain else stderr,
                 p_market_yes=implied.get(q.ticker),
                 rationale=(f"{station.name} {kind} {target}: NBM {f.txn:.0f}F +/-{f.xnd:.0f} "
-                           f"(run {f.runtime:%m-%d %HZ}) -> mu {dist.mu:.1f} sigma {dist.sigma:.1f}"
-                           + (f"; observed {'max' if kind == 'high' else 'min'} so far "
-                              f"{lower if kind == 'high' else upper}F" if observed else "")),
-                meta={"station": code, "kind": kind, "target": target.isoformat(), "mu": round(dist.mu, 2),
-                      "sigma": round(dist.sigma, 2), "same_day": target == today, "bound_certain": certain},
+                           f"(run {f.runtime:%m-%d %HZ})"
+                           + (f"; observed {'max' if kind == 'high' else 'min'} so far {dist.observed}F"
+                              f"{'' if dist.exact else ' (whole-C readings)'}, rest of day "
+                              + (f"~{dist.remaining.mu:.0f}F" if dist.remaining else "none left")
+                              if isinstance(dist, ObservedExtreme) else
+                              f" -> mu {dist.mu:.1f} sigma {dist.sigma:.1f}")),
+                meta={"station": code, "kind": kind, "target": target.isoformat(),
+                      "same_day": target == today, "bound_certain": certain},
             ))
-        return PricedEvent(ev, code, kind, target.isoformat(), round(dist.mu, 2), round(dist.sigma, 2),
+        mu = getattr(dist, "mu", None)
+        sigma = getattr(dist, "sigma", None)
+        return PricedEvent(ev, code, kind, target.isoformat(),
+                           round(mu, 2) if mu is not None else round(f.txn + params.bias, 2),
+                           round(sigma, 2) if sigma is not None else 0.0,
                            f.runtime.isoformat(), observed, fairs)
 
     def scan(self, series: Optional[List[str]] = None) -> List[PricedEvent]:

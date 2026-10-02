@@ -12,7 +12,8 @@ from src.engines.evaluate import (
     select,
     shrink,
 )
-from src.engines.fees import FeeSchedule, SeriesFees, series_of
+from src.engines.fees import FeeSchedule, SeriesFees
+from src.engines.market import Quote as _Q
 from src.engines.market import Book, Event, Quote, walk_asks
 
 
@@ -56,7 +57,7 @@ def test_series_fees_falls_back_pessimistically_on_error():
 
     sched = SeriesFees(Boom()).get("KXFOO")
     assert sched.maker_fees and sched.multiplier == 1.0
-    assert series_of("KXHIGHNY-26OCT02-B83.5") == "KXHIGHNY"
+    assert _Q("KXHIGHNY-26OCT02-B83.5", "E").series_ticker == "KXHIGHNY"
 
 
 # -- market ------------------------------------------------------------------
@@ -179,7 +180,7 @@ def test_uninformed_engine_does_not_post_inside_wide_spreads():
 
 def test_reprice_uses_the_live_mid_not_the_snapshot_consensus():
     from src.engines.fees import SeriesFees
-    from src.engines.runner import reprice
+    from src.engines.runner import ScanContext, reprice
 
     class Live:
         def book(self, ticker):  # the market moved down to 0.40/0.42 since the snapshot
@@ -190,11 +191,11 @@ def test_reprice_uses_the_live_mid_not_the_snapshot_consensus():
     fair = Fair(stale.ticker, p_yes=0.50, weight=0.0, p_market_yes=0.50)  # weight 0: pure market-follow
     fees = SeriesFees()
     fees.seed("KXHIGHNY", {"fee_type": "quadratic", "fee_multiplier": 1})
+    ctx = ScanContext(fetcher=None, kp=Live(), fees=fees, cfg=EvalConfig(include_maker=False))
     # On the snapshot nothing trades; on the live book a stale 0.50 mid would show 6c of fake edge.
-    assert reprice(Live(), "x", [(stale, fair)], EvalConfig(include_maker=False), fees) == []
+    assert reprice(ctx, "x", [(stale, fair)]) == []
     cheap = _quote(0.40, 0.42)
-    assert reprice(Live(), "x", [(cheap, Fair(cheap.ticker, 0.50, weight=0.0, p_market_yes=0.50))],
-                   EvalConfig(include_maker=False), fees) == []
+    assert reprice(ctx, "x", [(cheap, Fair(cheap.ticker, 0.50, weight=0.0, p_market_yes=0.50))]) == []
 
 
 def test_no_side_is_priced_from_yes_bid():
@@ -207,6 +208,17 @@ def test_taker_size_limited_by_visible_depth():
     q = _quote(0.46, 0.47, size=7)
     o = evaluate("x", q, Fair(q.ticker, p_yes=0.70), EvalConfig(include_maker=False, bankroll=100000))[0]
     assert o.contracts == 7
+
+
+def test_resized_order_keeps_its_uncertainty_margin():
+    cfg = EvalConfig(bankroll=1000, max_event_fraction=0.005, max_bet_fraction=0.03, include_maker=False, z=1.0)
+    q = _quote(0.46, 0.47)
+    # EV ~ 0.0727 clears 0.03 + 0.04 at full size; shrunk to ~10 contracts the per-contract
+    # fee rounds up and EV drops under the same bar, so it must be dropped, not kept.
+    opps = evaluate("x", q, Fair(q.ticker, p_yes=0.56, weight=1.0, stderr=0.04), cfg)
+    assert opps and all(o.meta["min_ev"] == pytest.approx(0.07) for o in opps)
+    for o in select(opps, cfg):
+        assert o.ev >= o.meta["min_ev"]
 
 
 def test_select_enforces_event_budget_and_one_entry_per_market():

@@ -86,16 +86,60 @@ class TempDistribution:
 
     def prob(self, quote: Quote) -> Optional[float]:
         """P(YES) for a temperature market, or None if its strikes aren't numeric."""
-        if quote.contains(round(self.mu)) is None:
+        return prob_from_pmf(self.pmf(), quote)
+
+
+def prob_from_pmf(pmf: Dict[int, float], quote: Quote) -> Optional[float]:
+    total = 0.0
+    for v, p in pmf.items():
+        hit = quote.contains(v)
+        if hit is None:
             return None
-        total = 0.0
-        for v, p in self.pmf().items():
-            hit = quote.contains(v)
-            if hit is None:
-                return None
-            if hit:
-                total += p
-        return min(max(total, 0.0), 1.0)
+        if hit:
+            total += p
+    return min(max(total, 0.0), 1.0)
+
+
+@dataclass
+class ObservedExtreme:
+    """Today's extreme once the day has started: T = max(observed, rest of day)
+    for a high, min(...) for a low.
+
+    ``observed`` is the conservative bound from readings so far (a floor on the
+    high, a ceiling on the low). When the binding reading was whole-degree
+    Celsius, the truth spans 1.8 F beyond that bound (above it for a high, below
+    for a low), so the observed part spreads over the bound and two degrees past
+    it. ``remaining`` is
+    the forecast extreme over the hours still to come (None once none are left,
+    when the observed part is the whole answer).
+    """
+
+    kind: str
+    observed: int
+    exact: bool = True
+    remaining: Optional[TempDistribution] = None
+
+    def pmf(self) -> Dict[int, float]:
+        step = 1 if self.kind == "high" else -1  # the direction the truth can lie past the bound
+        b = self.observed
+        obs = {b: 1.0} if self.exact else {b: 0.25, b + step: 0.5, b + 2 * step: 0.25}
+        if self.remaining is None:
+            return obs
+        rest = self.remaining.pmf()
+        support = sorted(set(obs) | set(rest))
+        out: Dict[int, float] = {}
+        for v in support:
+            # max(O, R) = v  /  min(O, R) = v, from the two marginals (independent).
+            if self.kind == "high":
+                le = lambda d, x: sum(p for k, p in d.items() if k <= x)  # noqa: E731
+                out[v] = le(obs, v) * le(rest, v) - le(obs, v - 1) * le(rest, v - 1)
+            else:
+                ge = lambda d, x: sum(p for k, p in d.items() if k >= x)  # noqa: E731
+                out[v] = ge(obs, v) * ge(rest, v) - ge(obs, v + 1) * ge(rest, v + 1)
+        return {v: p for v, p in out.items() if p > 1e-12}
+
+    def prob(self, quote: Quote) -> Optional[float]:
+        return prob_from_pmf(self.pmf(), quote)
 
 
 def log_score(dist: TempDistribution, actual: int) -> float:

@@ -7,7 +7,9 @@ import pytest
 
 from src.engines.market import Quote
 from src.engines.weather.calibration import Sample, WeatherCalibration
-from src.engines.weather.backtest import _candle_quote, devig, fit_weight
+from src.engines.market import devig
+from src.engines.trust import fit_weight
+from src.engines.weather.backtest import _candle_quote
 from src.engines.weather.climate import parse_cli
 from src.engines.weather.model import CalibParams, TempDistribution
 from src.engines.weather.nbm import NbmIndex, latest_forecast, parse_nbs_csv, target_ftime
@@ -154,13 +156,14 @@ def test_observations_ignore_flagged_readings_and_spikes():
                                "temperature": {"value": c, "qualityControl": qc}}}
 
     day = start + timedelta(days=1)
-    feats = [obs(12, 20.0), obs(13, 21.0), obs(14, 30.0, qc="X"), obs(15, 21.5)]
-    assert summarize_observations(feats, start, day).max_f == 71  # 21.5C; the rejected 30C is dropped
-    feats = [obs(12, 20.0), obs(13, 26.0), obs(14, 21.0)]  # isolated 79F between 68F and 70F
+    # Tenths (METAR precision) so these test glitch handling, not precision widening.
+    feats = [obs(12, 20.1), obs(13, 21.1), obs(14, 30.1, qc="X"), obs(15, 21.6)]
+    assert summarize_observations(feats, start, day).max_f == 71  # 21.6C; the rejected 30C is dropped
+    feats = [obs(12, 20.1), obs(13, 26.1), obs(14, 21.1)]  # isolated 79F between 68F and 70F
     assert summarize_observations(feats, start, day).max_f == 70
-    feats = [obs(12, 20.0), obs(13, 21.0), obs(14, 26.0)]  # newest reading jumps: unconfirmed yet
+    feats = [obs(12, 20.1), obs(13, 21.1), obs(14, 26.1)]  # newest reading jumps: unconfirmed yet
     assert summarize_observations(feats, start, day).max_f == 70
-    feats = [obs(9, 12.0), obs(12, 15.0), obs(15, 18.0), obs(18, 21.0)]  # steady 5-6F/3h warming is weather
+    feats = [obs(9, 12.1), obs(12, 15.1), obs(15, 18.1), obs(18, 21.1)]  # steady 5-6F/3h warming is weather
     assert summarize_observations(feats, start, day).max_f == 70
 
 
@@ -181,6 +184,22 @@ def test_backtest_helpers():
     assert fit_weight(rows) > 0.9
     rows = [{"p_model": 0.5, "p_market": 0.9 if y else 0.1, "outcome": y} for y in [1, 0] * 50]
     assert fit_weight(rows) < 0.1
+
+
+def test_whole_degree_celsius_readings_widen_the_bound():
+    """Real KHOU data: the 5-minute feed reports whole C. 24 C could be 76.1 F, so the
+    CLI low can still be 76 and the 76-77 bucket is live, not ruled out."""
+    start = datetime(2026, 10, 2, 6, tzinfo=timezone.utc)
+    coarse = [{"properties": {"timestamp": f"2026-10-02T{h:02d}:05:00+00:00",
+                              "temperature": {"value": c, "qualityControl": "V"}}}
+              for h, c in ((7, 25.0), (8, 24.0), (9, 25.0))]
+    o = summarize_observations(coarse, start, start + timedelta(days=1))
+    assert o.min_f == 76  # 24.5 C = 76.1 F, not 75
+    assert o.max_f == 76  # high is at least 24.5 C = 76.1 F
+    precise = [{"properties": {"timestamp": "2026-10-02T08:53:00+00:00", "rawMessage":
+                               "KHOU 020853Z 36011KT 10SM BKN023 A2988 RMK AO2 T02390233",
+                               "temperature": {"value": 24.0, "qualityControl": "V"}}}]
+    assert summarize_observations(precise, start, start + timedelta(days=1)).min_f == 75  # 23.9 C exact
 
 
 def test_edge_policy_replay_blocks_a_losing_engine():
@@ -214,3 +233,31 @@ def test_earned_weight_requires_significance():
     w, z = earned_weight(informative)
     assert w > 0.5 and z > 2
     assert earned_weight(noise)[0] == 0.0
+
+
+def test_observed_extreme_combines_observed_and_rest_of_day():
+    from src.engines.weather.model import ObservedExtreme
+    from src.engines.weather.nbm import NbmTemp, remaining_extreme
+
+    # Houston low, afternoon: observed ceiling 76 F (exact), rest of day forecast ~85 F.
+    rest = TempDistribution(mu=85.0, sigma=2.0)
+    d = ObservedExtreme("low", 76, exact=True, remaining=rest)
+    assert sum(d.pmf().values()) == pytest.approx(1.0)
+    assert d.pmf()[76] > 0.99  # the evening won't come close to 76: the low is set
+    # Coarse (whole-C) reading: the true low may sit 1-2 degrees under the ceiling.
+    coarse = ObservedExtreme("low", 76, exact=False, remaining=rest)
+    mass = {v for v, p in coarse.pmf().items() if p > 1e-3}
+    assert mass == {74, 75, 76} and coarse.pmf()[75] == pytest.approx(0.5, abs=1e-3)
+    # Morning high: observed floor 70, the afternoon forecast ~80 dominates.
+    hi = ObservedExtreme("high", 70, remaining=TempDistribution(mu=80.0, sigma=2.0))
+    assert max(hi.pmf(), key=hi.pmf().get) == 80 and hi.pmf().get(69, 0.0) == 0.0
+    # No hours left: the observation is the answer.
+    assert ObservedExtreme("high", 88).pmf() == {88: 1.0}
+
+    now = datetime(2026, 10, 2, 19, tzinfo=timezone.utc)
+    temps = [NbmTemp(datetime(2026, 10, 2, 12, tzinfo=timezone.utc), datetime(2026, 10, 2, h, tzinfo=timezone.utc), t)
+             for h, t in ((18, 90.0), (21, 88.0), (23, 84.0))]
+    assert remaining_extreme(temps, "low", now, datetime(2026, 10, 3, 6, tzinfo=timezone.utc)) == 84.0
+    assert remaining_extreme(temps, "high", now, datetime(2026, 10, 3, 6, tzinfo=timezone.utc)) == 88.0
+    assert remaining_extreme(temps, "low", datetime(2026, 10, 3, 1, tzinfo=timezone.utc),
+                             datetime(2026, 10, 3, 6, tzinfo=timezone.utc)) is None

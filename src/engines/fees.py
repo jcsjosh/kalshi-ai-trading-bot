@@ -22,6 +22,8 @@ import math
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
+from src.engines.http import KALSHI_API
+
 TAKER_COEFFICIENT = 0.07
 MAKER_COEFFICIENT = 0.0175
 _FREE_MAKER_TYPES = {"quadratic"}
@@ -73,7 +75,7 @@ DEFAULT_SCHEDULE = FeeSchedule()
 class SeriesFees:
     """Lazy per-series fee lookup backed by ``GET /series/{ticker}``."""
 
-    def __init__(self, fetcher=None, base_url: str = "https://api.elections.kalshi.com/trade-api/v2"):
+    def __init__(self, fetcher: Optional[Any] = None, base_url: str = KALSHI_API):
         self.fetcher = fetcher
         self.base_url = base_url
         self._cache: Dict[str, FeeSchedule] = {}
@@ -96,7 +98,3 @@ class SeriesFees:
                 schedule = FeeSchedule(fee_type="unknown", multiplier=1.0)
         self._cache[series_ticker] = schedule
         return schedule
-
-
-def series_of(ticker: Optional[str]) -> str:
-    return (ticker or "").split("-", 1)[0]

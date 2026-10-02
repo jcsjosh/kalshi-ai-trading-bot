@@ -75,17 +75,19 @@ This is the loop, closed: **decide → trade → settle → measure → re-deriv
 
 ## Edge Engines (models that have to earn their trust)
 
-Engines price markets from their own models and trade only through the same guard stack, journal and Edge Policy as everything else (`method=engine:<name>`, so a losing engine gets blocked on its own record). Each engine's view is shrunk toward the market by the trust it has **earned out-of-sample**: zero until a backtest or paper record proves otherwise. Full write-up: **[docs/ENGINES.md](docs/ENGINES.md)**.
+Engines price markets from their own models and trade only through the same guard stack, journal and Edge Policy as everything else (`method=engine:<name>`, so a losing engine gets blocked on its own record). Each engine's view is shrunk toward the market by the trust it has **earned out-of-sample**: zero until a backtest or its *shadow* paper record (the model priced at full trust, recorded but never sent) proves otherwise. Full write-up: **[docs/ENGINES.md](docs/ENGINES.md)**.
 
 | Engine | Model | Measured |
 |---|---|---|
 | `weather` | NOAA National Blend of Models at the exact NWS settlement station, calibrated per station, truncated by today's observations | **No edge.** 2,180 settled events: market Brier 0.104 vs engine 0.119. Walk-forward trading lost $888 (t = -2.2); the Edge Policy would have shut it off after 8 trades (-$68). Earned weight: 0, so it abstains |
-| `arbitrage` | Probability-axiom violations (all-NO, proven-exhaustive all-YES, same-subject ladders) after per-series fees, walked off live depth | Full scan of ~13,800 events in ~16s; nothing survives fees today. Rejects two real data traps (cross-player ladders, mislabeled "exactly N" strikes) that would otherwise show $300+ "risk-free" mirages |
+| `games` | Kalshi game winners vs a consensus of the de-vigged DraftKings line (`sports-skills`) and Polymarket's book | **Untested.** No sportsbook archive exists to backtest; runs in shadow. First snapshot: 40 games, DraftKings and Polymarket within 0.8 pts (median) and Kalshi inside that band. Earns trust only via `engines promote games` |
+| `arbitrage` | Probability-axiom violations (all-NO, proven-exhaustive all-YES, same-subject ladders) after per-series fees, walked off live depth | Full scan of ~13,800 events in ~16s; nothing survives fees today. Rejects two real data traps (cross-player ladders, mislabeled "exactly N" strikes) that would otherwise show $300+ "risk-free" mirages. oracle3's checker re-prices every basket and can veto it |
 
 ```bash
 python cli.py engines scan             # price everything, list opportunities (read-only, no key needed)
 python cli.py engines run              # same, then record to the paper ledger (nothing sent)
 python cli.py engines paper --settle   # score each engine's paper record vs the market
+python cli.py engines promote games    # does the shadow record earn trust? (--save to apply)
 python cli.py engines backtest --save-weight   # weather: walk-forward backtest -> earned trust weight
 ```
 

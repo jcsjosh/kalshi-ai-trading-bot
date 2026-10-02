@@ -179,7 +179,8 @@ def evaluate(
                 continue
             fee = fees.per_contract(n, price, role)
             ev = win - price - fee
-            if ev < cfg.min_edge + cfg.z * fair.stderr:
+            min_ev = cfg.min_edge + cfg.z * fair.stderr
+            if ev < min_ev:
                 continue
             cost = price + fee
             opps.append(
@@ -205,7 +206,8 @@ def evaluate(
                     expected_profit=round(n * ev, 2),
                     hours_to_close=None if hours is None else round(hours, 2),
                     rationale=fair.rationale,
-                    meta={**fair.meta, "fee_type": fees.fee_type, "fee_multiplier": fees.multiplier},
+                    meta={**fair.meta, "fee_type": fees.fee_type, "fee_multiplier": fees.multiplier,
+                          "min_ev": round(min_ev, 4)},
                 )
             )
     return opps
@@ -228,7 +230,9 @@ def select(opps: Iterable[Opportunity], cfg: EvalConfig, max_orders: int = 20) -
             continue
         if o.stake > room:
             o = _resize(o, int(room // (o.price + o.fee)))
-            if o.contracts < 1 or o.ev < cfg.min_edge:
+            # A smaller order pays more fee per contract; it must still clear the
+            # same bar (uncertainty margin included) that admitted it.
+            if o.contracts < 1 or o.ev < o.meta.get("min_ev", cfg.min_edge):
                 continue
         chosen.append(o)
         used_markets.add(o.ticker)

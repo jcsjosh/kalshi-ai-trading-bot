@@ -284,7 +284,7 @@ async def hunt(top: int = 25, books: bool = True) -> Dict[str, Any]:
 
 
 @mcp.tool(annotations=_READ_ONLY)
-async def engines_scan(engines: str = "weather,arbitrage", bankroll: float = 1000.0,
+async def engines_scan(engines: str = "weather,games,arbitrage", bankroll: float = 1000.0,
                        min_edge: float = 0.03, max_orders: int = 20) -> Dict[str, Any]:
     """Run the model-driven edge engines over the live book (public data, no key needed).
     ``weather`` prices every open temperature market from NOAA's calibrated station
@@ -304,13 +304,7 @@ async def engines_scan(engines: str = "weather,arbitrage", bankroll: float = 100
                         EvalConfig(bankroll=bankroll, min_edge=min_edge), max_orders)
 
     report = await asyncio.to_thread(_run)
-    return {
-        "selected": [o.to_dict() for o in report.selected],
-        "baskets": [b.to_dict() for b in report.baskets],
-        "priced": {k: {kk: vv for kk, vv in v.items() if kk != "events_detail"}
-                   for k, v in report.priced.items()},
-        "notes": report.notes,
-    }
+    return report.to_dict()
 
 
 @mcp.tool(annotations=_READ_ONLY)

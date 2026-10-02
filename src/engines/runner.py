@@ -6,109 +6,200 @@ sent on a stale quote. Selection applies the portfolio budgets. Execution is a
 dry run (recorded to the paper ledger) unless ``live=True``, in which case each
 order goes through ``place_guarded_order``: risk governor, Edge Policy, size
 caps, journal. Engines never get a private path to the exchange.
+
+Model engines are also evaluated in **shadow**: the same markets priced as if
+the engine were fully trusted (``w = 1``). Shadow orders are never sent; they
+go to the paper ledger so an untrusted engine still builds the forward record
+it needs to earn trust (``cli.py engines promote``).
 """
 
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from src.engines.arbitrage import Basket, scan_events
 from src.engines.evaluate import EvalConfig, Fair, Opportunity, evaluate, select
 from src.engines.fees import SeriesFees
-from src.engines.market import KalshiPublic, Quote
+from src.engines.market import Book, KalshiPublic, Quote
 
 MAKER_TTL_MIN = 60  # resting quotes expire rather than going stale
+SHADOW_WEIGHT = 1.0
+
+Log = Callable[[str], None]
+Pairs = List[Tuple[Quote, Fair]]
+
+
+@dataclass
+class ScanContext:
+    fetcher: Any
+    kp: KalshiPublic
+    fees: SeriesFees
+    cfg: EvalConfig
+    series: Optional[List[str]] = None
+    log: Log = lambda *_: None
+    books: Dict[str, Book] = field(default_factory=dict)
+
+    def book(self, ticker: str) -> Book:
+        if ticker not in self.books:
+            self.books[ticker] = self.kp.book(ticker)
+        return self.books[ticker]
 
 
 @dataclass
 class ScanReport:
     opportunities: List[Opportunity] = field(default_factory=list)
     selected: List[Opportunity] = field(default_factory=list)
+    shadow: List[Opportunity] = field(default_factory=list)
     baskets: List[Basket] = field(default_factory=list)
     priced: Dict[str, Any] = field(default_factory=dict)  # engine -> summary of what it priced
     notes: List[str] = field(default_factory=list)
 
+    def to_dict(self, detail: bool = False) -> Dict[str, Any]:
+        priced = self.priced if detail else {
+            k: {kk: vv for kk, vv in v.items() if kk != "detail"} for k, v in self.priced.items()}
+        out = {
+            "selected": [o.to_dict() for o in self.selected],
+            "shadow": [o.to_dict() for o in self.shadow],
+            "baskets": [b.to_dict() for b in self.baskets],
+            "priced": priced,
+            "notes": self.notes,
+        }
+        if detail:
+            out["opportunities"] = [o.to_dict() for o in self.opportunities]
+        return out
 
-def reprice(kp: KalshiPublic, engine: str, pairs: Sequence[tuple], cfg: EvalConfig, fees: SeriesFees,
-            log=lambda *_: None) -> List[Opportunity]:
+
+def reprice(ctx: ScanContext, engine: str, pairs: Pairs) -> List[Opportunity]:
     """Evaluate on snapshots, then re-evaluate every nominee on its live book."""
-    nominees = []
-    for q, fair in pairs:
-        if evaluate(engine, q, fair, cfg, fees.get(q.series_ticker)):
-            nominees.append((q, fair))
     out = []
-    for q, fair in nominees:
+    for q, fair in pairs:
+        if not evaluate(engine, q, fair, ctx.cfg, ctx.fees.get(q.series_ticker)):
+            continue
         try:
-            kp.book(q.ticker).apply_to(q)
+            ctx.book(q.ticker).apply_to(q)
         except Exception as exc:
-            log(f"  book {q.ticker}: {exc}")
+            ctx.log(f"  book {q.ticker}: {exc}")
             continue
         # The engine's market consensus came from the snapshot. Against a fresh book
         # it must come from the fresh book too, or a stale mid passes for edge.
-        live = replace(fair, p_market_yes=None)
-        out.extend(evaluate(engine, q, live, cfg, fees.get(q.series_ticker)))
+        out.extend(evaluate(engine, q, replace(fair, p_market_yes=None), ctx.cfg, ctx.fees.get(q.series_ticker)))
     return out
 
 
-def scan_weather(fetcher, kp: KalshiPublic, cfg: EvalConfig, fees: SeriesFees, report: ScanReport,
-                 series: Optional[List[str]] = None, log=lambda *_: None) -> None:
+# -- model engines: each returns (pairs, summary, notes) -------------------------------
+
+
+def price_weather(ctx: ScanContext) -> Tuple[Pairs, Dict[str, Any], List[str]]:
+    from src.engines.trust import weight_for
     from src.engines.weather.engine import WeatherEngine, quotes_by_ticker
 
-    eng = WeatherEngine(fetcher, kp, log=log)
-    priced = eng.scan(series)
+    eng = WeatherEngine(ctx.fetcher, ctx.kp, log=ctx.log)
+    weight, source = weight_for("weather", default=float(eng.cal.weight or 0.0))
+    eng.cal.weight = weight
+    priced = eng.scan(ctx.series)
     pairs = list(quotes_by_ticker(priced).values())
-    report.priced["weather"] = {
-        "events": len(priced),
-        "markets": len(pairs),
-        "weight": eng.weight,
+    summary = {
+        "events": len(priced), "markets": len(pairs), "weight": weight,
         "calibrated_through": eng.cal.fitted_through,
-        "events_detail": [
-            {"event": p.event.event_ticker, "station": p.code, "kind": p.kind, "target": p.target,
-             "mu": p.mu, "sigma": p.sigma, "run": p.forecast_run,
-             "observed": None if p.observed is None else {"max": p.observed.max_f, "min": p.observed.min_f}}
-            for p in priced
-        ],
+        "detail": [{"event": p.event.event_ticker, "station": p.code, "kind": p.kind, "target": p.target,
+                    "mu": p.mu, "sigma": p.sigma, "run": p.forecast_run,
+                    "observed": None if p.observed is None else {"max": p.observed.max_f, "min": p.observed.min_f}}
+                   for p in priced],
     }
-    if not eng.weight:
-        why = eng.cal.weight_source or "no backtest recorded yet; run `cli.py engines backtest --save-weight`"
-        report.notes.append(
-            f"weather: trust weight is 0 ({why}). Only outcomes already decided by today's "
-            "observations can trade.")
-    report.opportunities.extend(reprice(kp, "weather", pairs, cfg, fees, log))
+    notes = []
+    if not weight:
+        why = source or eng.cal.weight_source or "no evidence yet; run `cli.py engines backtest --save-weight`"
+        notes.append(f"weather: trust weight is 0 ({why}). Only outcomes already decided by today's "
+                     "observations can trade; the forecast itself is paper-tested in shadow.")
+    return pairs, summary, notes
 
 
-def scan_arbitrage(kp: KalshiPublic, fees: SeriesFees, report: ScanReport, min_profit: float = 0.01,
-                   series: Optional[List[str]] = None, log=lambda *_: None) -> None:
-    events = []
-    if series:
-        for s in series:
-            events.extend(kp.iter_events(status="open", series_ticker=s))
+def price_games(ctx: ScanContext) -> Tuple[Pairs, Dict[str, Any], List[str]]:
+    from src.engines.games import GamesEngine
+    from src.engines.trust import weight_for
+
+    try:
+        import sports_skills  # noqa: F401
+    except ImportError:
+        return [], {"events": 0, "markets": 0}, [
+            "games: needs the optional `sports-skills` package (pip install sports-skills)"]
+    weight, source = weight_for("games")
+    priced = GamesEngine(ctx.fetcher, ctx.kp, weight=weight, log=ctx.log).scan()
+    pairs = [(q, f) for g in priced for q in g.event.markets for f in g.fairs if f.ticker == q.ticker]
+    summary = {"events": len(priced), "markets": len(pairs), "weight": weight,
+               "detail": [{"event": g.event.event_ticker, "sport": g.sport, "start": g.start,
+                           "sources": g.sources} for g in priced]}
+    notes = [] if weight else [f"games: trust weight is 0 ({source or 'no settled shadow record yet'}); "
+                               "paper-tested in shadow until `cli.py engines promote games` says otherwise."]
+    return pairs, summary, notes
+
+
+MODEL_ENGINES: Dict[str, Callable[[ScanContext], Tuple[Pairs, Dict[str, Any], List[str]]]] = {
+    "weather": price_weather,
+    "games": price_games,
+}
+
+
+# -- arbitrage ---------------------------------------------------------------------
+
+
+def scan_arbitrage(ctx: ScanContext, report: ScanReport, min_profit: float = 0.01) -> None:
+    from src.engines.crosscheck import oracle3_verdict
+
+    if ctx.series:
+        events = [e for s in ctx.series for e in ctx.kp.iter_events(status="open", series_ticker=s)]
     else:
-        events = list(kp.iter_events(status="open", max_pages=200))
+        events = list(ctx.kp.iter_events(status="open", max_pages=200))
     report.priced["arbitrage"] = {"events": len(events), "markets": sum(len(e.markets) for e in events)}
-    log(f"arbitrage: {len(events)} open events loaded; checking candidates against live books")
-    report.baskets.extend(scan_events(events, lambda s: fees.get(s), kp.book, min_profit=min_profit, log=log))
+    ctx.log(f"arbitrage: {len(events)} open events loaded; checking candidates against live books")
+    baskets = scan_events(events, ctx.fees.get, ctx.book, min_profit=min_profit, log=ctx.log)
+    event_cap = ctx.cfg.bankroll * ctx.cfg.max_event_fraction
+    for b in baskets:
+        if not b.risk_free:
+            continue
+        # Same per-event budget as every other trade.
+        if b.count * b.cost > event_cap:
+            b.count = int(event_cap // b.cost)
+            b.meta["capped_by"] = f"{ctx.cfg.max_event_fraction:.0%} per-event budget"
+        verdict = oracle3_verdict(b, ctx.fees.get(b.series_ticker))
+        if verdict is not None:
+            b.meta["oracle3"] = verdict
+            if not verdict["agrees"]:
+                b.risk_free = False
+                b.note += f" oracle3 does not confirm ({verdict}); not traded."
+    report.baskets.extend(b for b in baskets if b.count > 0 or not b.risk_free)
 
 
 def scan(fetcher, engines: Sequence[str], cfg: EvalConfig, max_orders: int = 20,
-         series: Optional[List[str]] = None, log=lambda *_: None) -> ScanReport:
-    kp = KalshiPublic(fetcher)
-    fees = SeriesFees(fetcher)
+         series: Optional[List[str]] = None, log: Log = lambda *_: None) -> ScanReport:
+    ctx = ScanContext(fetcher, KalshiPublic(fetcher), SeriesFees(fetcher), cfg, series, log)
     report = ScanReport()
+    shadow_opps: List[Opportunity] = []
     for name in engines:
+        if name != "arbitrage" and name not in MODEL_ENGINES:
+            report.notes.append(f"unknown engine {name!r}")
+            continue
         try:
-            if name == "weather":
-                scan_weather(fetcher, kp, cfg, fees, report, series, log)
-            elif name == "arbitrage":
-                scan_arbitrage(kp, fees, report, series=series, log=log)
-            else:
-                report.notes.append(f"unknown engine {name!r}")
+            if name == "arbitrage":
+                scan_arbitrage(ctx, report)
+                continue
+            pairs, summary, notes = MODEL_ENGINES[name](ctx)
+            report.priced[name] = summary
+            report.notes.extend(notes)
+            report.opportunities.extend(reprice(ctx, name, pairs))
+            # Shadow: the raw model, fully trusted. Outcomes already certain from
+            # observations need no skill, so they stay out of the model's test.
+            shadow_pairs = [(q, replace(f, weight=SHADOW_WEIGHT)) for q, f in pairs
+                            if not f.meta.get("bound_certain")]
+            for o in reprice(ctx, name, shadow_pairs):
+                o.meta["shadow"] = True
+                shadow_opps.append(o)
         except Exception as exc:  # report the failure; other engines still run
             report.notes.append(f"{name}: scan failed: {exc}")
     report.selected = select(report.opportunities, cfg, max_orders=max_orders)
+    report.shadow = select(shadow_opps, cfg, max_orders=max_orders)
     return report
 
 
@@ -116,7 +207,7 @@ def scan(fetcher, engines: Sequence[str], cfg: EvalConfig, max_orders: int = 20,
 
 
 def basket_opportunities(b: Basket) -> List[Opportunity]:
-    """A basket's legs as taker orders for the ledger / guarded execution."""
+    """A basket's legs as taker orders for the ledger."""
     per = b.profit / max(len(b.legs), 1)
     return [
         Opportunity(engine="arbitrage", ticker=leg.ticker, event_ticker=b.event_ticker,
@@ -130,7 +221,15 @@ def basket_opportunities(b: Basket) -> List[Opportunity]:
     ]
 
 
-async def execute_live(client, orders: Sequence[Opportunity], log=print) -> List[Dict[str, Any]]:
+def live_plan(report: ScanReport) -> Tuple[List[Basket], List[Opportunity]]:
+    """What a live run sends: risk-free baskets first, then single orders on
+    markets no basket touches (never two positions in one market from one run)."""
+    baskets = [b for b in report.baskets if b.risk_free and b.count > 0]
+    taken = {leg.ticker for b in baskets for leg in b.legs}
+    return baskets, [o for o in report.selected if o.ticker not in taken]
+
+
+async def execute_live(client, orders: Sequence[Opportunity], log: Log = print) -> List[Dict[str, Any]]:
     """Send each order through the full guard stack. Taker = immediate-or-cancel."""
     from src.agent.toolbelt import place_guarded_order
 
@@ -149,30 +248,49 @@ async def execute_live(client, orders: Sequence[Opportunity], log=print) -> List
     return results
 
 
-async def execute_basket_live(client, b: Basket, log=print) -> Dict[str, Any]:
+def basket_fill_report(b: Basket, fills: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Complete only if every leg filled exactly the same count. An earlier leg
+    that filled more than a later one leaves that excess unhedged."""
+    final = min((f["filled"] for f in fills), default=0) if len(fills) == len(b.legs) else 0
+    excess = {f["ticker"]: f["filled"] - final for f in fills if f["filled"] > final}
+    complete = final > 0 and not excess
+    note = None
+    if not complete:
+        note = ("INCOMPLETE BASKET: unhedged contracts " +
+                ", ".join(f"{t} x{n}" for t, n in excess.items()) + ". Check positions; close or re-hedge."
+                if excess else "Nothing filled.")
+    return {"basket": b.kind, "event": b.event_ticker, "complete": complete, "baskets_held": final,
+            "unhedged": excess, "legs": fills, "note": note}
+
+
+async def execute_basket_live(client, b: Basket, log: Log = print) -> Dict[str, Any]:
     """Legs scarcest-first as immediate-or-cancel; later legs shrink to what filled.
 
-    Kalshi has no atomic multi-leg order, so a leg that comes back short is the
-    one real risk here. Sizing every later leg to the filled count keeps the
-    position a complete basket whenever any of it fills.
+    Kalshi has no atomic multi-leg order. The preflight runs every leg through
+    the same guards (governor, policy, caps) *and* checks the whole basket's
+    cost against cash before anything is sent; after that, a short fill is the
+    one remaining risk, and it is reported leg by leg.
     """
     from src.agent.toolbelt import place_guarded_order
 
-    # Preflight every leg through the same guards (governor, policy, size caps)
-    # before sending any of them: a refusal on leg 3 after legs 1-2 filled would
-    # leave an unhedged position.
+    def refuse(why: str) -> Dict[str, Any]:
+        return {"basket": b.kind, "event": b.event_ticker, "complete": False, "legs": [],
+                "note": f"{why}; nothing sent"}
+
     target = b.count
     for leg in b.legs:
         pre = await place_guarded_order(
             client, ticker=leg.ticker, side=leg.side, count=target, price=leg.price, type_="market",
             category=b.series_ticker, dry=True, method="engine:arbitrage")
         if not pre.get("ok"):
-            return {"basket": b.kind, "event": b.event_ticker, "complete": False, "legs": [],
-                    "note": f"preflight refused {leg.ticker}: {pre.get('reason')}; nothing sent"}
+            return refuse(f"preflight refused {leg.ticker}: {pre.get('reason')}")
         target = min(target, int(pre.get("count") or 0))
+    bal = await client.get_balance()
+    cash = int(bal.get("balance", 0) or 0) / 100.0
+    per_basket = sum(leg.price + leg.fee for leg in b.legs)
+    target = min(target, int(cash // per_basket)) if per_basket > 0 else 0
     if target < 1:
-        return {"basket": b.kind, "event": b.event_ticker, "complete": False, "legs": [],
-                "note": "preflight sized the basket to 0; nothing sent"}
+        return refuse(f"basket costs ${per_basket:.2f} each and cash is ${cash:.2f}")
 
     fills = []
     for leg in sorted(b.legs, key=lambda l: l.available):
@@ -189,10 +307,4 @@ async def execute_basket_live(client, b: Basket, log=print) -> Dict[str, Any]:
             target = filled
         if target == 0:
             break
-    complete = target > 0 and all(f["filled"] >= target for f in fills) and len(fills) == len(b.legs)
-    return {"basket": b.kind, "event": b.event_ticker, "complete": complete, "legs": fills,
-            "note": None if complete else "INCOMPLETE BASKET: unhedged legs may be open; check positions."}
-
-
-def now_utc() -> datetime:
-    return datetime.now(timezone.utc)
+    return basket_fill_report(b, fills)

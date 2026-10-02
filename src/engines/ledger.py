@@ -16,13 +16,15 @@ the market closed.
 from __future__ import annotations
 
 import json
-import math
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import numpy as np
+
 from src.engines.evaluate import Opportunity
+from src.engines.trust import log_loss
 
 DEFAULT_LEDGER_PATH = Path("data/engines/paper_ledger.jsonl")
 
@@ -45,6 +47,8 @@ def record_from_opportunity(o: Opportunity, now: Optional[datetime] = None, bask
         "p_fair": o.p_fair,
         "ev": o.ev,
         "basket": basket,
+        "shadow": bool(o.meta.get("shadow")),  # priced at full trust; tests the model, never sent
+        "certain": bool(o.meta.get("bound_certain")),  # decided by observations, not forecast skill
         "rationale": o.rationale,
         "filled": True if o.role == "taker" else None,
         "outcome": None,
@@ -134,24 +138,26 @@ def settle(records: List[Dict[str, Any]], kp, log=lambda *_: None) -> int:
     return n
 
 
-def _log_loss(p: float, y: int) -> float:
-    p = min(max(p, 1e-6), 1 - 1e-6)
-    return -(y * math.log(p) + (1 - y) * math.log(1 - p))
-
-
 def summarize(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Per engine (live-trust and shadow records kept apart): fills, P&L, and
+    log loss of the *engine's own* probability vs the market's for the side
+    bought. Outcomes decided by observations are left out of the log-loss
+    comparison: they need no forecasting skill and would flatter the engine."""
     groups: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for r in records:
-        groups[r["engine"]].append(r)
-        groups["ALL"].append(r)
+        name = r["engine"] + (" (shadow)" if r.get("shadow") else "")
+        groups[name].append(r)
+        groups["ALL" + (" (shadow)" if r.get("shadow") else "")].append(r)
     out = {}
     for name, rs in sorted(groups.items()):
         settled = [r for r in rs if r.get("outcome")]
         filled = [r for r in settled if r.get("filled")]
         staked = sum(r["contracts"] * (r["price"] + r["fee"]) for r in filled)
         pnl = sum(r["outcome"]["pnl"] for r in filled)
-        scored = [r for r in filled if r.get("p_market") is not None]
-        y = [1 if r["outcome"]["won"] else 0 for r in scored]
+        scored = [r for r in filled if r.get("p_market") is not None and not r.get("certain")]
+        y = np.array([1.0 if r["outcome"]["won"] else 0.0 for r in scored])
+        ll = (lambda key: round(float(np.mean(log_loss(np.array([r[key] for r in scored]), y))), 4)
+              if scored else None)
         out[name] = {
             "orders": len(rs),
             "open": len(rs) - len(settled),
@@ -162,8 +168,7 @@ def summarize(records: List[Dict[str, Any]]) -> Dict[str, Any]:
             "pnl": round(pnl, 2),
             "roi": round(pnl / staked, 4) if staked else None,
             "expected_pnl": round(sum(r["contracts"] * r["ev"] for r in filled), 2),
-            # Probability for the side bought; lower log loss than the market = real information.
-            "log_loss_engine": round(sum(_log_loss(r["p_fair"], yy) for r, yy in zip(scored, y)) / len(y), 4) if y else None,
-            "log_loss_market": round(sum(_log_loss(r["p_market"], yy) for r, yy in zip(scored, y)) / len(y), 4) if y else None,
+            "log_loss_engine": ll("p_engine"),
+            "log_loss_market": ll("p_market"),
         }
     return out

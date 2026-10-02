@@ -112,3 +112,42 @@ def test_scan_events_survives_book_errors():
         raise RuntimeError("book down")
 
     assert scan_events([ev], lambda s: FeeSchedule("quadratic", 0.0), boom) == []
+
+
+# -- oracle3 cross-check (runs when oracle3 is importable, e.g. ORACLE3_PATH=/path/to/clone) --
+
+from src.engines import crosscheck  # noqa: E402
+from src.engines.arbitrage import Basket, Leg  # noqa: E402
+
+needs_oracle3 = pytest.mark.skipif(not crosscheck.available(), reason="oracle3 not installed")
+
+
+@needs_oracle3
+def test_oracle3_confirms_a_real_ladder():
+    b = Basket("ladder-greater", "E", "KXIDX", "", [Leg("A", "yes", 0.32, 0.02, 10), Leg("B", "no", 0.60, 0.02, 10)],
+               payout=1.0, cost=0.96, profit=0.04, count=10, risk_free=True, note="")
+    v = crosscheck.oracle3_verdict(b, FeeSchedule())
+    assert v["relation"] == "implication" and v["agrees"] and v["net_edge"] > 0
+
+
+@needs_oracle3
+def test_oracle3_rejects_a_basket_fees_eat():
+    legs = [Leg(t, "no", p, 0.0, 100) for t, p in (("a", 0.97), ("b", 0.82), ("c", 0.54), ("d", 0.70), ("e", 0.93))]
+    b = Basket("all-NO", "E", "KXHIGHNY", "", legs, payout=4.0, cost=3.96, profit=0.04, count=100,
+               risk_free=True, note="")
+    v = crosscheck.oracle3_verdict(b, FeeSchedule())
+    assert v["relation"] == "exclusivity" and not v["agrees"]  # 4c overround < ~5c of taker fees
+
+
+@needs_oracle3
+def test_oracle3_fees_match_ours_on_a_grid():
+    from decimal import Decimal
+    from oracle3 import fees as o3
+
+    k = o3.KalshiSchedule(multiplier=Decimal("1"), maker_fees=True)
+    ours = FeeSchedule("quadratic_with_maker_fees", 1.0)
+    for price in (0.01, 0.07, 0.33, 0.5, 0.88, 0.99):
+        for n in (1, 7, 100, 1000):
+            for maker in (False, True):
+                theirs = float(k.fee(price, Decimal(n), maker=maker))
+                assert ours.fee(n, price, "maker" if maker else "taker") == pytest.approx(theirs, abs=0.0101)

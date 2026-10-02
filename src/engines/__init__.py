@@ -15,6 +15,8 @@ Engines:
 * ``weather``   - NOAA National Blend of Models station forecasts, calibrated
                    per station against the exact NWS climate reports Kalshi
                    settles on, truncated by today's observations.
+* ``games``     - Kalshi game-winner markets vs a consensus of the de-vigged
+                   DraftKings line (via sports-skills) and Polymarket's book.
 * ``arbitrage`` - structural mispricings (mutually exclusive baskets, proven-
                    exhaustive buckets, same-subject strike ladders) priced off
                    live order book depth and per-series fees.
@@ -22,4 +24,4 @@ Engines:
 See ``docs/ENGINES.md`` for the measured results.
 """
 
-ENGINE_NAMES = ("weather", "arbitrage")
+ENGINE_NAMES = ("weather", "games", "arbitrage")

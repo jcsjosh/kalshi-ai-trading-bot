@@ -36,6 +36,18 @@ class NbmForecast:
         return self.runtime + PUBLISH_LATENCY
 
 
+@dataclass(frozen=True)
+class NbmTemp:
+    """One hourly (3-hourly in NBS) temperature forecast from a run."""
+
+    runtime: datetime
+    ftime: datetime
+    tmp: float
+
+    def available_at(self) -> datetime:
+        return self.runtime + PUBLISH_LATENCY
+
+
 def _ts(raw: str) -> datetime:
     return datetime.strptime(raw.strip(), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
 
@@ -54,8 +66,33 @@ def parse_nbs_csv(text: str) -> List[NbmForecast]:
     return out
 
 
-def fetch_nbs(fetcher, icao: str, start: datetime, end: datetime, cache_ttl: Optional[float] = 1800) -> List[NbmForecast]:
-    """NBS ``txn``/``xnd`` rows for runs issued in [start, end]."""
+def parse_nbs_temps(text: str) -> List[NbmTemp]:
+    out = []
+    for row in csv.DictReader(io.StringIO(text)):
+        tmp = (row.get("tmp") or "").strip()
+        if not tmp:
+            continue
+        try:
+            out.append(NbmTemp(_ts(row["runtime"]), _ts(row["ftime"]), float(tmp)))
+        except (KeyError, ValueError):
+            continue
+    return out
+
+
+def remaining_extreme(temps: Iterable[NbmTemp], kind: str, now: datetime, day_end: datetime) -> Optional[float]:
+    """The latest published run's forecast high (or low) over the rest of the CLI day.
+    None when no forecast hour is left (the day is effectively over)."""
+    usable = [t for t in temps if t.available_at() <= now]
+    if not usable:
+        return None
+    run = max(t.runtime for t in usable)
+    left = [t.tmp for t in usable if t.runtime == run and now < t.ftime <= day_end]
+    if not left:
+        return None
+    return max(left) if kind == "high" else min(left)
+
+
+def fetch_nbs_text(fetcher, icao: str, start: datetime, end: datetime, cache_ttl: Optional[float] = 1800) -> str:
     params = {
         "station": icao,
         "model": "NBS",
@@ -63,8 +100,12 @@ def fetch_nbs(fetcher, icao: str, start: datetime, end: datetime, cache_ttl: Opt
         "ets": end.strftime("%Y-%m-%dT%H:%MZ"),
         "format": "csv",
     }
-    text = fetcher.get(IEM_MOS, params, as_text=True, cache=True, cache_ttl=cache_ttl)
-    return parse_nbs_csv(text)
+    return fetcher.get(IEM_MOS, params, as_text=True, cache=True, cache_ttl=cache_ttl)
+
+
+def fetch_nbs(fetcher, icao: str, start: datetime, end: datetime, cache_ttl: Optional[float] = 1800) -> List[NbmForecast]:
+    """NBS ``txn``/``xnd`` rows for runs issued in [start, end]."""
+    return parse_nbs_csv(fetch_nbs_text(fetcher, icao, start, end, cache_ttl))
 
 
 def target_ftime(target: date, kind: str) -> datetime:

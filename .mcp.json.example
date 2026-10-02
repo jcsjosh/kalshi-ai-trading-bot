@@ -1,0 +1,21 @@
+{
+  "mcpServers": {
+    "kalshi-trading": {
+      "command": "kalshi-mcp",
+      "args": []
+    },
+    "kalshi-rules": {
+      "command": "uvx",
+      "args": ["mcp-server-kalshi"],
+      "env": { "KALSHI_ENV": "demo" }
+    },
+    "oracle3": {
+      "command": "uvx",
+      "args": ["oracle3", "mcp"]
+    },
+    "context-mode": {
+      "command": "npx",
+      "args": ["-y", "context-mode"]
+    }
+  }
+}

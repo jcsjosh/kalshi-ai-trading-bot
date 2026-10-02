@@ -15,9 +15,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
-from src.engines.fees import series_of
+from src.agent.settle import series_category as series_of
+from src.engines.http import KALSHI_API
 
-KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
 
 
 def _f(raw: Any) -> Optional[float]:
@@ -257,6 +257,20 @@ def walk_asks(levels: List[Tuple[float, float]], max_price: float, max_count: fl
         filled += take
         cost += take * price
     return filled, (cost / filled if filled else 0.0)
+
+
+def devig(quotes: List[Quote]) -> Dict[str, float]:
+    """Market-implied probabilities from mids, normalized across an exhaustive event."""
+    mids = {}
+    for q in quotes:
+        if q.yes_bid is None and q.yes_ask is None:
+            mids[q.ticker] = 0.005
+        else:
+            lo = q.yes_bid if q.yes_bid is not None else 0.0
+            hi = q.yes_ask if q.yes_ask is not None else min(lo + 0.02, 1.0)
+            mids[q.ticker] = max((lo + hi) / 2.0, 0.005)
+    total = sum(mids.values())
+    return {t: v / total for t, v in mids.items()} if total > 0 else {}
 
 
 class KalshiPublic:

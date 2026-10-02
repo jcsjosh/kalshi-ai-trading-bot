@@ -27,6 +27,7 @@ from urllib.parse import urlencode, urlparse
 import httpx
 
 DEFAULT_CACHE_DIR = Path("data/cache/http")
+KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
 USER_AGENT = "kalshi-ai-trading-bot/edge-engines (github.com/ryanfrigo/kalshi-ai-trading-bot)"
 
 # Seconds between requests to the same host. Kalshi's public tier allows ~20/s

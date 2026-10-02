@@ -29,14 +29,16 @@ memory — read it if you lack context.
    **Edge engines:** run `cli.py engines run` (dry: it records to the paper ledger,
    sends nothing) every tick, and `cli.py engines paper --settle` once a day. Engines
    price markets from models (`weather`: NOAA NBM at the settlement station;
-   `arbitrage`: probability-axiom violations after fees) and only trust a model as far
-   as its out-of-sample record earned. **Never pass `--live` for an engine whose earned
-   weight is 0** (the weather engine's is: 2,180-event backtest, market Brier 0.104 vs
-   0.119, simulated -$888; see `docs/ENGINES.md`). A `[RISK-FREE]` arbitrage basket
-   is the exception: verify the rules of every leg yourself (Kalshi has shipped
-   mislabeled strike metadata), then `engines run --engines arbitrage --live`.
-   Promote an engine to live capital only when its paper log loss beats the market's
-   over many settled orders AND its paper P&L is positive.
+   `games`: DraftKings + Polymarket consensus; `arbitrage`: probability-axiom
+   violations after fees) and trust a model only as far as its out-of-sample
+   record earned. At trust 0 (weather and games today; weather's 2,180-event
+   backtest found no edge, see `docs/ENGINES.md`) a live run can only send
+   observation-certain weather outcomes and oracle3-confirmed `[RISK-FREE]`
+   baskets. Before any `--live` run, read the rules of every leg yourself
+   (Kalshi has shipped mislabeled strike metadata) and prefer an explicit
+   `--engines arbitrage`.
+   Engines earn trust only through `cli.py engines promote <engine>` (settled shadow
+   record: log loss beats the market's at z >= 2 AND positive P&L) or a backtest.
 3. **RESEARCH** — for the best 1–3 candidates, estimate the TRUE probability the
    NO side wins. Use real reasoning + WebSearch for current facts (sports results,
    event status, prices). **This step is the whole point** — it's where you beat
