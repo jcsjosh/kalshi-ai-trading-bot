@@ -109,6 +109,9 @@ def price_weather(ctx: ScanContext) -> Tuple[Pairs, Dict[str, Any], List[str]]:
                    for p in priced],
     }
     notes = []
+    if eng.failed_series:
+        notes.append(f"weather: skipped {len(eng.failed_series)} series Kalshi would not serve "
+                     f"({', '.join(eng.failed_series[:5])}{'...' if len(eng.failed_series) > 5 else ''})")
     if not weight:
         why = source or eng.cal.weight_source or "no evidence yet; run `cli.py engines backtest --save-weight`"
         notes.append(f"weather: trust weight is 0 ({why}). Only outcomes already decided by today's "

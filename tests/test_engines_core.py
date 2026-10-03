@@ -231,3 +231,35 @@ def test_select_enforces_event_budget_and_one_entry_per_market():
     assert sum(o.stake for o in chosen) <= 1000 * 0.05 + 1e-6
     for o in chosen:
         assert o.ev >= cfg.min_edge
+
+
+# -- http -------------------------------------------------------------------------
+
+
+def _fetcher_with(responses, monkeypatch, **kw):
+    import httpx
+
+    from src.engines import http as h
+
+    monkeypatch.setattr(h.time, "sleep", lambda s: None)
+    calls = iter(responses)
+    client = httpx.Client(transport=httpx.MockTransport(lambda req: next(calls)))
+    return h.Fetcher(cache_dir=None, client=client, **kw)
+
+
+def test_rate_limits_are_waited_out_beyond_the_error_budget(monkeypatch):
+    import httpx
+
+    seven_429s = [httpx.Response(429, headers={"retry-after": "1"})] * 7
+    f = _fetcher_with(seven_429s + [httpx.Response(200, json={"ok": 1})], monkeypatch, max_retries=5)
+    assert f.get("https://api.elections.kalshi.com/x") == {"ok": 1}
+
+
+def test_persistent_rate_limit_still_gives_up(monkeypatch):
+    import httpx
+
+    from src.engines.http import FetchError
+
+    f = _fetcher_with([httpx.Response(429)] * 20, monkeypatch, max_retries=2, rate_limit_retries=3)
+    with pytest.raises(FetchError, match="gave up after 5 attempts"):
+        f.get("https://api.elections.kalshi.com/x")

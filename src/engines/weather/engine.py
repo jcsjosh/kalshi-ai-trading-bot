@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from src.engines.evaluate import Fair
+from src.engines.http import FetchError
 from src.engines.market import Event, KalshiPublic, Quote, devig
 from src.engines.weather.backtest import discover_temperature_series
 from src.engines.weather.calibration import DEFAULT_CALIBRATION_PATH, WeatherCalibration
@@ -82,6 +83,7 @@ class WeatherEngine:
         self._nbm: Dict[str, NbmIndex] = {}
         self._temps: Dict[str, List[NbmTemp]] = {}
         self._obs: Dict[str, Optional[ObservedSoFar]] = {}
+        self.failed_series: List[str] = []
 
     @property
     def weight(self) -> float:
@@ -171,7 +173,13 @@ class WeatherEngine:
     def scan(self, series: Optional[List[str]] = None) -> List[PricedEvent]:
         out = []
         for s in series or active_series(self.kp):
-            for ev in self.kp.iter_events(status="open", series_ticker=s):
+            try:
+                events = list(self.kp.iter_events(status="open", series_ticker=s))
+            except FetchError as exc:  # a rate-limited series shouldn't sink the other cities
+                self.log(f"  {s}: {exc}")
+                self.failed_series.append(s)
+                continue
+            for ev in events:
                 try:
                     priced = self.price_event(ev)
                 except Exception as exc:  # one station's outage shouldn't stop the scan

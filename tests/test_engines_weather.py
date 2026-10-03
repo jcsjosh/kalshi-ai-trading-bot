@@ -261,3 +261,19 @@ def test_observed_extreme_combines_observed_and_rest_of_day():
     assert remaining_extreme(temps, "high", now, datetime(2026, 10, 3, 6, tzinfo=timezone.utc)) == 88.0
     assert remaining_extreme(temps, "low", datetime(2026, 10, 3, 1, tzinfo=timezone.utc),
                              datetime(2026, 10, 3, 6, tzinfo=timezone.utc)) is None
+
+
+def test_scan_skips_a_series_kalshi_will_not_serve():
+    from src.engines.http import FetchError
+    from src.engines.weather.calibration import WeatherCalibration
+    from src.engines.weather.engine import WeatherEngine
+
+    class KP:
+        def iter_events(self, status, series_ticker):
+            if series_ticker == "KXHIGHTDC":
+                raise FetchError("HTTP 429")
+            return iter([])
+
+    eng = WeatherEngine(fetcher=None, kp=KP(), calibration=WeatherCalibration())
+    assert eng.scan(["KXHIGHTDC", "KXHIGHNY"]) == []
+    assert eng.failed_series == ["KXHIGHTDC"]

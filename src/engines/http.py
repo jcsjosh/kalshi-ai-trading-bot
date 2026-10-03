@@ -51,10 +51,12 @@ class Fetcher:
         cache_dir: Optional[Path | str] = DEFAULT_CACHE_DIR,
         timeout: float = 30.0,
         max_retries: int = 5,
+        rate_limit_retries: int = 8,
         client: Optional[httpx.Client] = None,
     ):
         self.cache_dir = Path(cache_dir) if cache_dir else None
         self.max_retries = max_retries
+        self.rate_limit_retries = rate_limit_retries
         self.client = client or httpx.Client(
             timeout=timeout, headers={"User-Agent": USER_AGENT}, follow_redirects=True
         )
@@ -132,13 +134,15 @@ class Fetcher:
 
         host = urlparse(full).netloc
         last_err = ""
-        for attempt in range(self.max_retries):
+        attempt = limited = 0
+        while attempt < self.max_retries:
             self._throttle(host)
             try:
                 resp = self.client.get(full, headers=headers)
             except httpx.HTTPError as exc:
                 last_err = f"{type(exc).__name__}: {exc}"
                 time.sleep(min(2**attempt, 20))
+                attempt += 1
                 continue
             if resp.status_code == 429 or resp.status_code >= 500:
                 last_err = f"HTTP {resp.status_code}"
@@ -146,8 +150,17 @@ class Fetcher:
                     # A daily quota (Open-Meteo free tier) will not clear by retrying.
                     raise FetchError(f"{host}: daily request quota exhausted")
                 retry_after = resp.headers.get("retry-after")
+                if resp.status_code == 429 and limited < self.rate_limit_retries:
+                    # Per-minute limits clear if we wait them out; slow this host down too.
+                    limited += 1
+                    delay = float(retry_after) if retry_after and retry_after.isdigit() else 2**limited
+                    with self._lock:
+                        self._last[host] = time.monotonic() + min(delay, 60)
+                    time.sleep(min(delay, 60))
+                    continue
                 delay = float(retry_after) if retry_after and retry_after.isdigit() else 2**attempt
                 time.sleep(min(delay, 30))
+                attempt += 1
                 continue
             if resp.status_code >= 400:
                 raise FetchError(f"{full}: HTTP {resp.status_code} {resp.text[:200]}")
@@ -158,4 +171,4 @@ class Fetcher:
             if cache:
                 self._cache_write(full, body)
             return body
-        raise FetchError(f"{full}: gave up after {self.max_retries} attempts ({last_err})")
+        raise FetchError(f"{full}: gave up after {attempt + limited} attempts ({last_err})")
